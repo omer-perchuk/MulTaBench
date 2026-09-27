@@ -53,6 +53,7 @@ class TabularModel:
                  no_pca: bool = False,
                  target_guided_fusion: bool = False,
                  target_column_name: str | None = None,
+                 target_conditioned_embedding: bool = False,
                  **kwargs):
         assert problem_type in {SupervisedTask.REGRESSION, SupervisedTask.BINARY, SupervisedTask.MULTICLASS}
         self.problem_type = problem_type
@@ -75,6 +76,14 @@ class TabularModel:
         self.no_pca = no_pca
         self.target_guided_fusion = target_guided_fusion
         self.target_column_name = target_column_name
+        self.target_conditioned_embedding = target_conditioned_embedding
+        if target_conditioned_embedding:
+            if target_guided_fusion:
+                raise ValueError('target_conditioned_embedding and target_guided_fusion cannot be combined.')
+            if tune_e5 or e5_model_name == TF_IDF or not self.USE_TEXT_EMBEDDINGS:
+                raise ValueError('Target-conditioned embeddings require a baseline using frozen E5 text embeddings.')
+            if not isinstance(target_column_name, str) or not target_column_name.strip():
+                raise ValueError('Target-conditioned embeddings require target column name metadata.')
         if target_guided_fusion:
             if tune_e5 or e5_model_name == TF_IDF or not self.USE_TEXT_EMBEDDINGS:
                 raise ValueError('Target-guided fusion requires a baseline using frozen E5 text embeddings.')
@@ -130,6 +139,7 @@ class TabularModel:
                 no_pca=self.no_pca,
                 target_guided_fusion=self.target_guided_fusion,
                 target_column_name=self.target_column_name,
+                target_conditioned_embedding=self.target_conditioned_embedding,
             )
             self.vprint(f"📝 Detected {len(self.text_transformers)} text features: {sorted(self.text_transformers)}")
         self.fit_internal_preprocessor(x=x_train, y=y_train)
@@ -248,7 +258,8 @@ class TabularModel:
         cols = list(x.columns)
         n_img = sum(1 for c in cols if "_img_pca_" in c)
         n_txt = sum(1 for c in cols if "_txt_pca_" in c or
-                    (self.target_guided_fusion and ("_e5_" in c or "_target_product_" in c)))
+                    (self.target_guided_fusion and ("_e5_" in c or "_target_product_" in c)) or
+                    (self.target_conditioned_embedding and "_target_conditioned_" in c))
         n_tab = len(cols) - n_img - n_txt
         parts = [f"tabular: {n_tab}"]
         if n_img:

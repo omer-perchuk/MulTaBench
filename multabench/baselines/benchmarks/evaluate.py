@@ -39,7 +39,8 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
                                 target_override: str | None = None,
                                 pca_components: int = 30,
                                 no_pca: bool = False,
-                                target_guided_fusion: bool = False) -> Dict:
+                                target_guided_fusion: bool = False,
+                                target_conditioned_embedding: bool = False) -> Dict:
     start_time = time.time()
     dataset_id = dataset.dataset_id
     is_cls = dataset.is_cls
@@ -52,6 +53,8 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
                   pca_components=pca_components, no_pca=no_pca)
     if target_guided_fusion:
         kwargs.update(target_guided_fusion=True, target_column_name=dataset.target_column_name)
+    if target_conditioned_embedding:
+        kwargs.update(target_conditioned_embedding=True, target_column_name=dataset.target_column_name)
     model = model_cls(**kwargs)
     with PeakMemoryTracker(phase='train', device=device) as train_tracker:
         model.fit(x_train, y_train)
@@ -90,6 +93,8 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
     }
     if target_guided_fusion:
         d_summary.update(target_guided_fusion=True, target_column_name=dataset.target_column_name)
+    if target_conditioned_embedding:
+        d_summary.update(target_conditioned_embedding=True, target_column_name=dataset.target_column_name)
     print(f"Scored {metrics.score:.4f} on dataset {dataset_id.name}, fold {fold} in {int(runtime)} seconds. Multimodal state: {multimodal_state}")
     return d_summary
 
@@ -111,7 +116,8 @@ def evaluate_on_dataset(model_cls: Type[TabularModel],
                         target_override: str | None = None,
                         pca_components: int = 30,
                         no_pca: bool = False,
-                        target_guided_fusion: bool = False) -> Dict:
+                        target_guided_fusion: bool = False,
+                        target_conditioned_embedding: bool = False) -> Dict:
     print(f"Running model {model_cls.MODEL_NAME} over dataset {dataset_id} with fold {fold}")
     dataset = download_dataset(dataset_id=dataset_id, multimodal_state=multimodal_state, target_override=target_override)
     return evaluate_on_loaded_dataset(
@@ -133,4 +139,5 @@ def evaluate_on_dataset(model_cls: Type[TabularModel],
         pca_components=pca_components,
         no_pca=no_pca,
         target_guided_fusion=target_guided_fusion,
+        target_conditioned_embedding=target_conditioned_embedding,
     )

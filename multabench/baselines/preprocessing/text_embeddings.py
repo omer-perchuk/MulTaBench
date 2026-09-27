@@ -62,11 +62,13 @@ class SkrubColumnEncoder:
 class E5ColumnEncoder:
     """Per-column text encoder: holds E5 model, tokenizer (processor), and PCA (or identity). Uses passage: col_name: col_val format."""
 
-    def __init__(self, model: Any, tokenizer: Any, encoder: Any, col_name: str):
+    def __init__(self, model: Any, tokenizer: Any, encoder: Any, col_name: str,
+                 target_column_name: str | None = None):
         self.model = model
         self.tokenizer = tokenizer
         self.encoder = encoder
         self.col_name = col_name
+        self.target_column_name = target_column_name
         self.n_components = encoder.n_components
 
     def encode_texts(self, texts: list[str], device: torch.device) -> np.ndarray:
@@ -76,11 +78,17 @@ class E5ColumnEncoder:
             model=self.model,
             tokenizer=self.tokenizer,
             device=device,
-            col_name=self.col_name,
+            col_name=_encoding_column_name(self.col_name, self.target_column_name),
         )
 
     def transform(self, X: np.ndarray) -> np.ndarray:
         return self.encoder.transform(X)
+
+
+def _encoding_column_name(col_name: str, target_column_name: str | None) -> str:
+    if target_column_name is None:
+        return col_name
+    return f"Target: {target_column_name}. {col_name}"
 
 
 def fit_text_encoders_skrub(
@@ -113,10 +121,14 @@ def fit_text_encoders_vanilla(
     no_pca: bool = False,
     target_guided_fusion: bool = False,
     target_column_name: str | None = None,
+    target_conditioned_embedding: bool = False,
 ) -> Dict[str, E5ColumnEncoder]:
     """Fit one E5ColumnEncoder per column using shared vanilla E5 + PCA per column. Uses passage: col_name: col_val format."""
     text_encoders: Dict[str, E5ColumnEncoder] = {}
     model, tokenizer = get_vanilla_e5(device, model_name=e5_model_name)
+    conditioned_target = target_column_name if target_conditioned_embedding else None
+    if target_conditioned_embedding:
+        model.requires_grad_(False)
     if target_guided_fusion:
         model.requires_grad_(False)
         target_embedding = encode_texts_with_e5(
@@ -136,14 +148,23 @@ def fit_text_encoders_vanilla(
             continue
         texts = x[col].astype(str).fillna("").tolist()
         print(f"Fitting E5ColumnEncoder for column {col} with model {e5_model_name} for {len(texts)} texts")
-        col_embeddings = encode_texts_with_e5(texts=texts, model=model, tokenizer=tokenizer, device=device, col_name=str(col))
+        col_embeddings = encode_texts_with_e5(
+            texts=texts, model=model, tokenizer=tokenizer, device=device,
+            col_name=_encoding_column_name(str(col), conditioned_target),
+        )
         if no_pca:
             encoder = _IdentityTransform(n_components=col_embeddings.shape[1])
         else:
             encoder = PCA(n_components=pca_components, random_state=SEED)
             encoder.fit(col_embeddings)
             log_pca_variance(pca=encoder, col_name=col)
-        text_encoders[str(col)] = E5ColumnEncoder(model=model, tokenizer=tokenizer, encoder=encoder, col_name=str(col))
+        text_encoders[str(col)] = E5ColumnEncoder(model=model, tokenizer=tokenizer, encoder=encoder,
+                                               col_name=str(col), target_column_name=conditioned_target)
+    if target_conditioned_embedding:
+        print(f"Target-conditioned E5: enabled\nTarget column: {target_column_name}\n"
+              f"Text columns: {text_features_list}\n"
+              f"E5 embedding dimension per text column: {col_embeddings.shape[1]}\n"
+              f"Final text representation dimensions: {sum(e.n_components for e in text_encoders.values())}")
     return text_encoders
 
 
@@ -234,6 +255,7 @@ def fit_text_encoders(
     no_pca: bool = False,
     target_guided_fusion: bool = False,
     target_column_name: str | None = None,
+    target_conditioned_embedding: bool = False,
 ) -> Dict[str, E5ColumnEncoder]:
     """
     Fit one E5 model per text column (or vanilla E5 shared across columns when not tuning).
@@ -241,6 +263,15 @@ def fit_text_encoders(
     Returns text_encoders mapping column -> E5ColumnEncoder.
     """
     text_features_list = sorted(text_features)
+    if target_conditioned_embedding:
+        if target_guided_fusion:
+            raise ValueError('target_conditioned_embedding and target_guided_fusion cannot be combined.')
+        if tune_e5 or e5_model_name == TF_IDF:
+            raise ValueError('Target-conditioned embeddings require frozen E5, without fine-tuning or TF-IDF.')
+        if not isinstance(target_column_name, str) or not target_column_name.strip():
+            raise ValueError('Target-conditioned embeddings require target column name metadata.')
+        if not text_features_list:
+            raise ValueError('Target-conditioned embeddings require at least one detected text column.')
     if target_guided_fusion:
         if tune_e5 or e5_model_name == TF_IDF:
             raise ValueError('Target-guided fusion requires frozen E5, without fine-tuning or TF-IDF.')
@@ -278,6 +309,7 @@ def fit_text_encoders(
         no_pca=no_pca,
         target_guided_fusion=target_guided_fusion,
         target_column_name=target_column_name,
+        target_conditioned_embedding=target_conditioned_embedding,
     )
 
 
@@ -292,6 +324,8 @@ def transform_text_features(
         n_components = wrapper.n_components
         pca_vec = wrapper.encoder.transform(embeddings)
         pca_cols = [f"{text_col}_txt_pca_{i}" for i in range(n_components)]
+        if isinstance(wrapper, E5ColumnEncoder) and wrapper.target_column_name is not None:
+            pca_cols = [f"{text_col}_target_conditioned_{i}" for i in range(n_components)]
         if isinstance(wrapper.encoder, _TargetGuidedTransform):
             dimension = wrapper.encoder.target_embedding.shape[0]
             pca_cols = ([f"{text_col}_e5_{i}" for i in range(dimension)] +

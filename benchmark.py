@@ -86,6 +86,8 @@ if __name__ == "__main__":
     parser.add_argument('--pca_components', type=int, default=30, help='Number of PCA components for image and text embeddings.')
     parser.add_argument('--target_guided_fusion', action='store_true',
                         help='Use frozen E5 [embedding, embedding * target-name embedding], without text PCA.')
+    parser.add_argument('--target_conditioned_embedding', action='store_true',
+                        help='Prefix frozen E5 text inputs with the raw target column name.')
     parser.add_argument('--no_pca', type=str, default='no', choices=['yes', 'no'],
                         help='Skip PCA and scaling for image/text embeddings. Exits early if dataset has >5 multimodal features.')
     args = parser.parse_args()
@@ -113,6 +115,11 @@ if __name__ == "__main__":
                     or (args.multimodal_state == "ft" and is_text_dataset(dataset))
                     or args.multimodal_state in {"ft-txt", "ft-img-ft-txt"})
     device = get_device(device=DEVICE)
+    if args.target_conditioned_embedding:
+        if args.target_guided_fusion:
+            raise ValueError('target_conditioned_embedding and target_guided_fusion cannot be combined.')
+        if args.tune_e5 or args.e5_model == TF_IDF:
+            raise ValueError('Target-conditioned embeddings require frozen E5, without fine-tuning or TF-IDF.')
     if is_invalid_model_dataset_pair(model_name=args.model, dataset_id=dataset):
         exit()
     exp_name = f"{args.model}_{dataset.name}_{args.multimodal_state}_{args.fold}"
@@ -155,6 +162,7 @@ if __name__ == "__main__":
             pca_components=args.pca_components,
             no_pca=no_pca,
             target_guided_fusion=args.target_guided_fusion,
+            target_conditioned_embedding=args.target_conditioned_embedding,
         )
         wandb_finish(d_summary=ret)
     except MultimodalError as e:
