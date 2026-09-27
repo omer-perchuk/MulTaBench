@@ -94,4 +94,5 @@ def load_multabench_dataset(dataset_id, multimodal_state: Optional[MultimodalSta
     x = df.drop(columns=[target_col])
     x = _apply_multimodal_state(x, image_col, multimodal_state)
 
-    return MultimodalDataset(x=x, y=y, task_type=_parse_task_type(meta, dataset_id, y), dataset_id=dataset_id, image_folder=image_folder)
+    return MultimodalDataset(x=x, y=y, task_type=_parse_task_type(meta, dataset_id, y), dataset_id=dataset_id,
+                            image_folder=image_folder, target_column_name=target_col)

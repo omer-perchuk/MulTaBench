@@ -38,7 +38,8 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
                                 e5_model_name: str = E5_SMALL_V2,
                                 target_override: str | None = None,
                                 pca_components: int = 30,
-                                no_pca: bool = False) -> Dict:
+                                no_pca: bool = False,
+                                target_guided_fusion: bool = False) -> Dict:
     start_time = time.time()
     dataset_id = dataset.dataset_id
     is_cls = dataset.is_cls
@@ -49,6 +50,8 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
                   dino_model_name=dino_model_name,
                   tune_e5=tune_e5, e5_train_kwargs=e5_train_kwargs, e5_model_name=e5_model_name,
                   pca_components=pca_components, no_pca=no_pca)
+    if target_guided_fusion:
+        kwargs.update(target_guided_fusion=True, target_column_name=dataset.target_column_name)
     model = model_cls(**kwargs)
     with PeakMemoryTracker(phase='train', device=device) as train_tracker:
         model.fit(x_train, y_train)
@@ -85,6 +88,8 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
         **(dino_train_kwargs or {}),
         **(e5_train_kwargs or {}),
     }
+    if target_guided_fusion:
+        d_summary.update(target_guided_fusion=True, target_column_name=dataset.target_column_name)
     print(f"Scored {metrics.score:.4f} on dataset {dataset_id.name}, fold {fold} in {int(runtime)} seconds. Multimodal state: {multimodal_state}")
     return d_summary
 
@@ -105,7 +110,8 @@ def evaluate_on_dataset(model_cls: Type[TabularModel],
                         e5_model_name: str = E5_SMALL_V2,
                         target_override: str | None = None,
                         pca_components: int = 30,
-                        no_pca: bool = False) -> Dict:
+                        no_pca: bool = False,
+                        target_guided_fusion: bool = False) -> Dict:
     print(f"Running model {model_cls.MODEL_NAME} over dataset {dataset_id} with fold {fold}")
     dataset = download_dataset(dataset_id=dataset_id, multimodal_state=multimodal_state, target_override=target_override)
     return evaluate_on_loaded_dataset(
@@ -126,4 +132,5 @@ def evaluate_on_dataset(model_cls: Type[TabularModel],
         target_override=target_override,
         pca_components=pca_components,
         no_pca=no_pca,
+        target_guided_fusion=target_guided_fusion,
     )

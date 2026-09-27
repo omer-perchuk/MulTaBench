@@ -30,6 +30,17 @@ class _IdentityTransform:
         return X
 
 
+class _TargetGuidedTransform:
+    """Fixed metadata-only interaction; no fitting or label access."""
+
+    def __init__(self, target_embedding: np.ndarray):
+        self.target_embedding = target_embedding
+        self.n_components = 2 * target_embedding.shape[0]
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        return np.concatenate([X, X * self.target_embedding], axis=1)
+
+
 class SkrubColumnEncoder:
     """Per-column text encoder using skrub.StringEncoder (TF-IDF + TruncatedSVD). CPU-only, no tokenizer needed."""
 
@@ -100,11 +111,29 @@ def fit_text_encoders_vanilla(
     e5_model_name: str = E5_SMALL_V2,
     pca_components: int = PCA_COMPONENTS,
     no_pca: bool = False,
+    target_guided_fusion: bool = False,
+    target_column_name: str | None = None,
 ) -> Dict[str, E5ColumnEncoder]:
     """Fit one E5ColumnEncoder per column using shared vanilla E5 + PCA per column. Uses passage: col_name: col_val format."""
     text_encoders: Dict[str, E5ColumnEncoder] = {}
     model, tokenizer = get_vanilla_e5(device, model_name=e5_model_name)
+    if target_guided_fusion:
+        model.requires_grad_(False)
+        target_embedding = encode_texts_with_e5(
+            texts=[target_column_name], col_name=None, model=model, tokenizer=tokenizer, device=device,
+        )[0]
+        dimension = target_embedding.shape[0]
+        print(f"Target-guided fusion: enabled\nTarget column: {target_column_name}\n"
+              f"Target embedding dimension: {dimension}\nText columns: {text_features_list}\n"
+              f"Original text embedding dimensions: {dimension * len(text_features_list)}\n"
+              f"Final text representation dimensions: {2 * dimension * len(text_features_list)}")
     for col in text_features_list:
+        if target_guided_fusion:
+            text_encoders[str(col)] = E5ColumnEncoder(
+                model=model, tokenizer=tokenizer,
+                encoder=_TargetGuidedTransform(target_embedding), col_name=str(col),
+            )
+            continue
         texts = x[col].astype(str).fillna("").tolist()
         print(f"Fitting E5ColumnEncoder for column {col} with model {e5_model_name} for {len(texts)} texts")
         col_embeddings = encode_texts_with_e5(texts=texts, model=model, tokenizer=tokenizer, device=device, col_name=str(col))
@@ -203,6 +232,8 @@ def fit_text_encoders(
     e5_model_name: str = E5_SMALL_V2,
     pca_components: int = PCA_COMPONENTS,
     no_pca: bool = False,
+    target_guided_fusion: bool = False,
+    target_column_name: str | None = None,
 ) -> Dict[str, E5ColumnEncoder]:
     """
     Fit one E5 model per text column (or vanilla E5 shared across columns when not tuning).
@@ -210,6 +241,13 @@ def fit_text_encoders(
     Returns text_encoders mapping column -> E5ColumnEncoder.
     """
     text_features_list = sorted(text_features)
+    if target_guided_fusion:
+        if tune_e5 or e5_model_name == TF_IDF:
+            raise ValueError('Target-guided fusion requires frozen E5, without fine-tuning or TF-IDF.')
+        if not isinstance(target_column_name, str) or not target_column_name.strip():
+            raise ValueError('Target-guided fusion requires target column name metadata.')
+        if not text_features_list:
+            raise ValueError('Target-guided fusion requires at least one detected text column.')
     if not text_features_list:
         return {}
     if e5_model_name == TF_IDF:
@@ -238,6 +276,8 @@ def fit_text_encoders(
         e5_model_name=e5_model_name,
         pca_components=pca_components,
         no_pca=no_pca,
+        target_guided_fusion=target_guided_fusion,
+        target_column_name=target_column_name,
     )
 
 
@@ -252,6 +292,10 @@ def transform_text_features(
         n_components = wrapper.n_components
         pca_vec = wrapper.encoder.transform(embeddings)
         pca_cols = [f"{text_col}_txt_pca_{i}" for i in range(n_components)]
+        if isinstance(wrapper.encoder, _TargetGuidedTransform):
+            dimension = wrapper.encoder.target_embedding.shape[0]
+            pca_cols = ([f"{text_col}_e5_{i}" for i in range(dimension)] +
+                        [f"{text_col}_target_product_{i}" for i in range(dimension)])
         pca_df = pd.DataFrame(pca_vec, index=x.index, columns=pca_cols)
         cols_before = len(x.columns)
         x = x.drop(columns=[text_col])

@@ -184,7 +184,7 @@ def _mean_pool_l2(last_hidden: torch.Tensor, attention_mask: torch.Tensor) -> to
 
 def encode_texts_with_e5(
     texts: List[str],
-    col_name: str,
+    col_name: str | None,
     model: Union[BertModel, nn.Module],
     tokenizer: AutoTokenizer,
     device: Union[torch.device, str],

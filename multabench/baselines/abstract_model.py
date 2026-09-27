@@ -24,7 +24,7 @@ from multabench.baselines.preprocessing.numerical import fit_numerical_median, t
 from multabench.baselines.preprocessing.target import transform_preprocess_y, fit_preprocess_y
 from multabench.datasets.multimodal import MultimodalError
 from multabench.dino.constants import DINOV3_SMALL
-from multabench.e5.constants import E5_SMALL_V2
+from multabench.e5.constants import E5_SMALL_V2, TF_IDF
 from multabench.baselines.preprocessing.text_embeddings import E5ColumnEncoder, fit_text_encoders, transform_text_features
 from multabench.datasets.objects import SupervisedTask
 from multabench.baselines.preprocessing.feature_types import detect_image_features
@@ -51,6 +51,8 @@ class TabularModel:
                  e5_model_name: str = E5_SMALL_V2,
                  pca_components: int = 30,
                  no_pca: bool = False,
+                 target_guided_fusion: bool = False,
+                 target_column_name: str | None = None,
                  **kwargs):
         assert problem_type in {SupervisedTask.REGRESSION, SupervisedTask.BINARY, SupervisedTask.MULTICLASS}
         self.problem_type = problem_type
@@ -71,6 +73,13 @@ class TabularModel:
         self.e5_model_name = e5_model_name
         self.pca_components = pca_components
         self.no_pca = no_pca
+        self.target_guided_fusion = target_guided_fusion
+        self.target_column_name = target_column_name
+        if target_guided_fusion:
+            if tune_e5 or e5_model_name == TF_IDF or not self.USE_TEXT_EMBEDDINGS:
+                raise ValueError('Target-guided fusion requires a baseline using frozen E5 text embeddings.')
+            if not isinstance(target_column_name, str) or not target_column_name.strip():
+                raise ValueError('Target-guided fusion requires target column name metadata.')
         self.model_ = self.initialize_model()
         self.target_transformer: Optional[LabelEncoder] = None
         self.date_transformers: Dict[str, DatetimeEncoder] = {}
@@ -119,6 +128,8 @@ class TabularModel:
                 e5_model_name=self.e5_model_name,
                 pca_components=self.pca_components,
                 no_pca=self.no_pca,
+                target_guided_fusion=self.target_guided_fusion,
+                target_column_name=self.target_column_name,
             )
             self.vprint(f"📝 Detected {len(self.text_transformers)} text features: {sorted(self.text_transformers)}")
         self.fit_internal_preprocessor(x=x_train, y=y_train)
@@ -236,7 +247,8 @@ class TabularModel:
     def _print_feature_summary(self, x: DataFrame) -> None:
         cols = list(x.columns)
         n_img = sum(1 for c in cols if "_img_pca_" in c)
-        n_txt = sum(1 for c in cols if "_txt_pca_" in c)
+        n_txt = sum(1 for c in cols if "_txt_pca_" in c or
+                    (self.target_guided_fusion and ("_e5_" in c or "_target_product_" in c)))
         n_tab = len(cols) - n_img - n_txt
         parts = [f"tabular: {n_tab}"]
         if n_img:

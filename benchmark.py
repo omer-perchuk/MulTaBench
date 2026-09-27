@@ -84,6 +84,8 @@ if __name__ == "__main__":
     parser.add_argument('--e5_weight_decay', type=float, default=_e5.weight_decay)
     parser.add_argument('--e5_batch_size', type=int, default=_e5.batch_size)
     parser.add_argument('--pca_components', type=int, default=30, help='Number of PCA components for image and text embeddings.')
+    parser.add_argument('--target_guided_fusion', action='store_true',
+                        help='Use frozen E5 [embedding, embedding * target-name embedding], without text PCA.')
     parser.add_argument('--no_pca', type=str, default='no', choices=['yes', 'no'],
                         help='Skip PCA and scaling for image/text embeddings. Exits early if dataset has >5 multimodal features.')
     args = parser.parse_args()
@@ -152,6 +154,7 @@ if __name__ == "__main__":
             target_override=args.target,
             pca_components=args.pca_components,
             no_pca=no_pca,
+            target_guided_fusion=args.target_guided_fusion,
         )
         wandb_finish(d_summary=ret)
     except MultimodalError as e:

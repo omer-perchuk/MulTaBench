@@ -28,6 +28,7 @@ class MultimodalDataset:
     task_type: SupervisedTask
     dataset_id: MultimodalDatasetID
     image_folder: str | None = None
+    target_column_name: str | None = None
 
     @property
     def is_cls(self) -> bool:
@@ -60,7 +61,8 @@ def curate_dataset(x: DataFrame | DatasetDict | None, y: Series | None,
     x, y = remove_missing_image_rows(x=x, y=y, curation=curation, image_folder=image_folder)
     x = filter_by_multimodality(x=x, multimodal_state=multimodal_state, curation=curation)
     validate_task_type(task_type=task_type, y=y)
-    dataset = MultimodalDataset(x=x, y=y, task_type=task_type, dataset_id=dataset_id, image_folder=image_folder)
+    dataset = MultimodalDataset(x=x, y=y, task_type=task_type, dataset_id=dataset_id, image_folder=image_folder,
+                                target_column_name=y.name if target_override is not None else curation.target.raw_name)
     if task_type == SupervisedTask.REGRESSION:
         check_extreme_outliers(y=y)
     return dataset

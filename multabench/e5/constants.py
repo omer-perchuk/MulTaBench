@@ -43,6 +43,8 @@ LORA_TEXT_TARGET_MODULES = [
 E5_PASSAGE_PREFIX = "passage: "
 
 
-def format_e5_passage(col_name: str, col_val: str) -> str:
+def format_e5_passage(col_name: str | None, col_val: str) -> str:
     """Format text for E5 embedding: passage: col_name: col_val."""
+    if col_name is None:
+        return f"{E5_PASSAGE_PREFIX}{col_val}"
     return f"{E5_PASSAGE_PREFIX}{col_name}: {col_val}"
