@@ -110,6 +110,8 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
             target_aware_interaction_pca=True, interaction_pca_components=interaction_pca_components,
             target_column_name=dataset.target_column_name,
             raw_interaction_dimensions=model.interaction_transformer.raw_interaction_dimensions,
+            n_text_columns=model.interaction_transformer.n_text_columns,
+            n_pairwise_interactions=model.interaction_transformer.n_pairwise_interactions,
             final_text_representation_dimensions=model.interaction_transformer.final_text_representation_dimensions,
         )
     print(f"Scored {metrics.score:.4f} on dataset {dataset_id.name}, fold {fold} in {int(runtime)} seconds. Multimodal state: {multimodal_state}")

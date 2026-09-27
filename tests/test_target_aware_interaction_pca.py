@@ -72,6 +72,8 @@ class InteractionPCATest(unittest.TestCase):
                              target_aware_interaction_pca=True, target_column_name='Raw target metadata',
                              no_pca=True)
         model.text_features = set(self.columns)
+        # The legacy no-PCA feature-count cap must not reject generalized interaction mode.
+        model.raise_if_no_pca_and_too_multimodal(None)
         model.USE_CATEGORICAL_ENCODING = False
         labels = object()
         train = self.x.iloc[:60]
@@ -93,12 +95,68 @@ class InteractionPCATest(unittest.TestCase):
             self.assertFalse(any(c.startswith('target_interaction') for c in result.columns))
 
     def test_column_count_and_component_limits(self):
-        for columns in ({'Title'}, {'Title', 'Review Text', 'Other'}):
-            with self.assertRaisesRegex(ValueError, 'exactly two'):
-                embeddings.TargetAwareInteractionPCA.fit(self.x, columns, 'Target', 'cpu')
+        with self.assertRaisesRegex(ValueError, 'at least one text column'):
+            embeddings.TargetAwareInteractionPCA.fit(self.x, set(), 'Target', 'cpu')
         for count in (0, -1, 71):
             with self.assertRaisesRegex(ValueError, 'training row count'):
                 embeddings.TargetAwareInteractionPCA.fit(self.x, set(self.columns), 'Target', 'cpu', n_components=count)
+
+        with patch.object(embeddings, 'get_vanilla_e5', return_value=(Mock(), Mock())), \
+                patch.object(embeddings, 'encode_texts_with_e5', return_value=np.ones((1, 384))):
+            with self.assertRaisesRegex(ValueError, 'effective maximum 384'):
+                embeddings.TargetAwareInteractionPCA.fit(
+                    pd.DataFrame({'Text': ['x'] * 400}), {'Text'}, 'Target', 'cpu', n_components=385)
+
+    def test_generalized_order_preservation_and_leakage(self):
+        rng = np.random.default_rng(42)
+        for k in (1, 2, 3, 6):
+            with self.subTest(k=k):
+                columns = [f'Text {i}' for i in range(k)]
+                values = rng.normal(size=(65, k, 384)).astype(np.float32)
+                target = rng.normal(size=384).astype(np.float32)
+                x = pd.DataFrame({col: [str(i) for i in range(65)] for col in reversed(columns)})
+                calls = []
+
+                def encode(texts, col_name, **kwargs):
+                    calls.append(col_name)
+                    if col_name is None:
+                        self.assertEqual(texts, ['Only raw metadata'])
+                        return target[None, :]
+                    return values[[int(i) for i in texts], columns.index(col_name)]
+
+                pca = PCA(n_components=50, random_state=17)
+                with patch.object(embeddings, 'get_vanilla_e5', return_value=(Mock(), Mock())), \
+                        patch.object(embeddings, 'encode_texts_with_e5', side_effect=encode), \
+                        patch.object(embeddings, 'PCA', return_value=pca), \
+                        patch.object(pca, 'fit', wraps=pca.fit) as fit:
+                    transformer = embeddings.TargetAwareInteractionPCA.fit(
+                        x.iloc[:60], set(columns), 'Only raw metadata', 'cpu')
+                    e = [values[:60, i] for i in range(k)]
+                    if k == 1:
+                        blocks = [e[0] * target]
+                    elif k == 2:
+                        blocks = [e[0] * target, e[1] * target, e[0] * e[1]]
+                    elif k == 3:
+                        blocks = [e[0] * target, e[1] * target, e[2] * target,
+                                  e[0] * e[1], e[0] * e[2], e[1] * e[2]]
+                    else:
+                        blocks = [v * target for v in e] + [e[i] * e[j] for i in range(k) for j in range(i + 1, k)]
+                    expected = np.concatenate(blocks, axis=1)
+                    np.testing.assert_array_equal(transformer.interactions(*e), expected)
+                    fit.assert_called_once()
+                    np.testing.assert_array_equal(fit.call_args.args[0], expected)
+                    self.assertEqual(transformer.n_pairwise_interactions, k * (k - 1) // 2)
+                    self.assertEqual(transformer.raw_interaction_dimensions, 384 * (k + k * (k - 1) // 2))
+                    with patch.object(pca, 'fit', side_effect=AssertionError('refit')), \
+                            patch.object(pca, 'fit_transform', side_effect=AssertionError('refit')):
+                        for frame in (x.iloc[:60], x.iloc[60:62], x.iloc[62:]):
+                            result = transformer.transform(frame, 'cpu')
+                            self.assertEqual(result.shape, (len(frame), k * 384 + 50))
+                            original = np.concatenate([values[frame.index, i] for i in range(k)], axis=1)
+                            np.testing.assert_array_equal(result.iloc[:, :k * 384], original)
+                            self.assertEqual(result.columns[0], 'Text 0_txt_pca_0')
+                            self.assertEqual(result.columns[-1], 'target_interaction_pca_49')
+                    self.assertEqual(calls.count(None), 1)
 
     def test_invalid_modes(self):
         for invalid in ({'target_guided_fusion': True}, {'target_conditioned_embedding': True},

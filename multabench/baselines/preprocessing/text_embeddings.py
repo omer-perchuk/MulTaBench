@@ -114,8 +114,8 @@ class TargetAwareInteractionPCA:
             device: torch.device, e5_model_name: str = E5_SMALL_V2,
             n_components: int = 50):
         columns = sorted(text_features)
-        if len(columns) != 2:
-            raise ValueError(f'Target-aware interaction PCA requires exactly two text columns; detected {columns}.')
+        if not columns:
+            raise ValueError('Target-aware interaction PCA requires at least one text column; detected zero.')
         if not isinstance(target_column_name, str) or not target_column_name.strip():
             raise ValueError('Target-aware interaction PCA requires raw target column name metadata.')
         if e5_model_name == TF_IDF:
@@ -129,17 +129,24 @@ class TargetAwareInteractionPCA:
             texts=[target_column_name], col_name=None, model=model, tokenizer=tokenizer, device=device,
         )[0]
         dimension = result.target_embedding.shape[0]
-        result.raw_interaction_dimensions = 3 * dimension
-        if n_components > result.raw_interaction_dimensions:
-            raise ValueError('interaction_pca_components exceeds the raw interaction dimensionality.')
+        result.n_text_columns = len(columns)
+        result.n_pairwise_interactions = len(columns) * (len(columns) - 1) // 2
+        result.raw_interaction_dimensions = dimension * (result.n_text_columns + result.n_pairwise_interactions)
+        maximum = min(len(x), result.raw_interaction_dimensions)
+        if n_components > maximum:
+            raise ValueError(f'interaction_pca_components={n_components} exceeds the effective maximum {maximum} '
+                             f'(training rows={len(x)}, raw interaction dimensions={result.raw_interaction_dimensions}).')
         result.encoders = {col: E5ColumnEncoder(model, tokenizer, _IdentityTransform(dimension), col)
                            for col in columns}
-        e1, e2 = result._encode(x, device)
+        encoded = result._encode(x, device)
         result.pca = PCA(n_components=n_components, random_state=SEED)
-        result.pca.fit(result.interactions(e1, e2))
-        result.final_text_representation_dimensions = 2 * dimension + n_components
+        result.pca.fit(result.interactions(*encoded))
+        result.final_text_representation_dimensions = len(columns) * dimension + n_components
         print(f"Target-aware interaction PCA: enabled\nTarget column: {target_column_name}\n"
-              f"Text columns: {columns}\nOriginal text embedding dimensions: {2 * dimension}\n"
+              f"Text columns: {columns}\nNumber of text columns: {len(columns)}\n"
+              f"Original text embedding dimensions: {len(columns) * dimension}\n"
+              f"Number of target interactions: {len(columns)}\n"
+              f"Number of pairwise text interactions: {result.n_pairwise_interactions}\n"
               f"Raw interaction dimensions: {result.raw_interaction_dimensions}\n"
               f"Interaction PCA components: {n_components}\n"
               f"Final text representation dimensions: {result.final_text_representation_dimensions}")
@@ -149,16 +156,20 @@ class TargetAwareInteractionPCA:
         return [encoder.encode_texts(x[col].astype(str).fillna('').tolist(), device)
                 for col, encoder in self.encoders.items()]
 
-    def interactions(self, e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
-        return np.concatenate([e1 * self.target_embedding, e2 * self.target_embedding, e1 * e2], axis=1)
+    def interactions(self, *encoded: np.ndarray) -> np.ndarray:
+        # Encoders follow sorted column names; pair order is lexicographic in their indices.
+        blocks = [e * self.target_embedding for e in encoded]
+        blocks.extend(encoded[i] * encoded[j] for i in range(len(encoded))
+                      for j in range(i + 1, len(encoded)))
+        return np.concatenate(blocks, axis=1)
 
     def transform(self, x: DataFrame, device: torch.device) -> DataFrame:
-        e1, e2 = self._encode(x, device)
-        compact = self.pca.transform(self.interactions(e1, e2))
+        encoded = self._encode(x, device)
+        compact = self.pca.transform(self.interactions(*encoded))
         names = [f'{col}_txt_pca_{i}' for col, encoder in self.encoders.items()
                  for i in range(encoder.n_components)]
         names += [f'target_interaction_pca_{i}' for i in range(self.pca.n_components)]
-        text = pd.DataFrame(np.concatenate([e1, e2, compact], axis=1), index=x.index, columns=names)
+        text = pd.DataFrame(np.concatenate([*encoded, compact], axis=1), index=x.index, columns=names)
         return pd.concat([x.drop(columns=list(self.encoders)), text], axis=1)
 
 

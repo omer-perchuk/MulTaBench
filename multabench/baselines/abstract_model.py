@@ -306,7 +306,7 @@ class TabularModel:
             print(s)
 
     def raise_if_no_pca_and_too_multimodal(self, x):
-        if self.no_pca:
+        if self.no_pca and not self.target_aware_interaction_pca:
             _image_cols = set(detect_image_features(x=x))
             _x_no_img = x[[c for c in x.columns if c not in _image_cols]]
             _num_feats = detect_numerical_features(_x_no_img)

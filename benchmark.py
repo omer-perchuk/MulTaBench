@@ -91,7 +91,7 @@ if __name__ == "__main__":
     parser.add_argument('--target_aware_transform', action='store_true',
                         help='Use frozen E5 with target-name projection, residual, and cosine; bypass text PCA.')
     parser.add_argument('--target_aware_interaction_pca', action='store_true',
-                        help='Keep full frozen E5 embeddings and append PCA of two-column interactions.')
+                        help='Keep full frozen E5 embeddings and append PCA of target and pairwise text interactions.')
     parser.add_argument('--interaction_pca_components', type=int, default=50)
     parser.add_argument('--no_pca', type=str, default='no', choices=['yes', 'no'],
                         help='Skip PCA and scaling for image/text embeddings. Exits early if dataset has >5 multimodal features.')
