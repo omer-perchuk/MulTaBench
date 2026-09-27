@@ -25,7 +25,7 @@ from multabench.baselines.preprocessing.target import transform_preprocess_y, fi
 from multabench.datasets.multimodal import MultimodalError
 from multabench.dino.constants import DINOV3_SMALL
 from multabench.e5.constants import E5_SMALL_V2, TF_IDF
-from multabench.baselines.preprocessing.text_embeddings import E5ColumnEncoder, fit_text_encoders, transform_text_features
+from multabench.baselines.preprocessing.text_embeddings import E5ColumnEncoder, fit_text_encoders, transform_text_features, TargetAwareInteractionPCA
 from multabench.datasets.objects import SupervisedTask
 from multabench.baselines.preprocessing.feature_types import detect_image_features
 from multabench.utils.warnings import silence_baselines_prints
@@ -54,6 +54,9 @@ class TabularModel:
                  target_guided_fusion: bool = False,
                  target_column_name: str | None = None,
                  target_conditioned_embedding: bool = False,
+                 target_aware_transform: bool = False,
+                 target_aware_interaction_pca: bool = False,
+                 interaction_pca_components: int = 50,
                  **kwargs):
         assert problem_type in {SupervisedTask.REGRESSION, SupervisedTask.BINARY, SupervisedTask.MULTICLASS}
         self.problem_type = problem_type
@@ -77,6 +80,24 @@ class TabularModel:
         self.target_guided_fusion = target_guided_fusion
         self.target_column_name = target_column_name
         self.target_conditioned_embedding = target_conditioned_embedding
+        self.target_aware_transform = target_aware_transform
+        self.target_aware_interaction_pca = target_aware_interaction_pca
+        self.interaction_pca_components = interaction_pca_components
+        self.interaction_transformer = None
+        if target_aware_interaction_pca:
+            if target_guided_fusion or target_conditioned_embedding or target_aware_transform:
+                raise ValueError('target_aware_interaction_pca cannot be combined with other target embedding experiments.')
+            if tune_e5 or e5_model_name == TF_IDF or not self.USE_TEXT_EMBEDDINGS:
+                raise ValueError('Target-aware interaction PCA requires a baseline using frozen E5 embeddings.')
+            if not isinstance(target_column_name, str) or not target_column_name.strip():
+                raise ValueError('Target-aware interaction PCA requires raw target column name metadata.')
+        if target_aware_transform:
+            if target_guided_fusion or target_conditioned_embedding:
+                raise ValueError('target_aware_transform cannot be combined with other target embedding experiments.')
+            if tune_e5 or e5_model_name == TF_IDF or not self.USE_TEXT_EMBEDDINGS:
+                raise ValueError('Target-aware transform requires a baseline using frozen E5 text embeddings.')
+            if not isinstance(target_column_name, str) or not target_column_name.strip():
+                raise ValueError('Target-aware transform requires target column name metadata.')
         if target_conditioned_embedding:
             if target_guided_fusion:
                 raise ValueError('target_conditioned_embedding and target_guided_fusion cannot be combined.')
@@ -124,7 +145,13 @@ class TabularModel:
             self.numerical_medians = fit_numerical_median(x=x_train, numerical_features=self.numerical_features)
         if self.USE_CATEGORICAL_ENCODING:
             self.categorical_encoders = fit_categorical_encoders(x=x_train, categorical_features=self.categorical_features)
-        if self.USE_TEXT_EMBEDDINGS:
+        if self.target_aware_interaction_pca:
+            self.interaction_transformer = TargetAwareInteractionPCA.fit(
+                x=x_train, text_features=self.text_features, target_column_name=self.target_column_name,
+                device=self.device, e5_model_name=self.e5_model_name,
+                n_components=self.interaction_pca_components,
+            )
+        elif self.USE_TEXT_EMBEDDINGS:
             self.text_transformers = fit_text_encoders(
                 x=x_train,
                 text_features=self.text_features,
@@ -140,6 +167,7 @@ class TabularModel:
                 target_guided_fusion=self.target_guided_fusion,
                 target_column_name=self.target_column_name,
                 target_conditioned_embedding=self.target_conditioned_embedding,
+                target_aware_transform=self.target_aware_transform,
             )
             self.vprint(f"📝 Detected {len(self.text_transformers)} text features: {sorted(self.text_transformers)}")
         self.fit_internal_preprocessor(x=x_train, y=y_train)
@@ -165,7 +193,9 @@ class TabularModel:
             x = transform_numerical_features(x=x, numerical_medians=self.numerical_medians)
         if self.USE_CATEGORICAL_ENCODING:
             x = transform_categorical_features(x=x, categorical_encoders=self.categorical_encoders)
-        if self.USE_TEXT_EMBEDDINGS:
+        if self.target_aware_interaction_pca:
+            x = self.interaction_transformer.transform(x, self.device)
+        elif self.USE_TEXT_EMBEDDINGS:
             x = transform_text_features(
                 x=x,
                 text_encoders=self.text_transformers,
@@ -258,8 +288,11 @@ class TabularModel:
         cols = list(x.columns)
         n_img = sum(1 for c in cols if "_img_pca_" in c)
         n_txt = sum(1 for c in cols if "_txt_pca_" in c or
+                    (self.target_aware_interaction_pca and c.startswith('target_interaction_pca_')) or
                     (self.target_guided_fusion and ("_e5_" in c or "_target_product_" in c)) or
-                    (self.target_conditioned_embedding and "_target_conditioned_" in c))
+                    (self.target_conditioned_embedding and "_target_conditioned_" in c) or
+                    (self.target_aware_transform and any(marker in c for marker in
+                     ("_e5_", "_target_parallel_", "_target_residual_", "_target_cosine"))))
         n_tab = len(cols) - n_img - n_txt
         parts = [f"tabular: {n_tab}"]
         if n_img:

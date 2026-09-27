@@ -40,7 +40,10 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
                                 pca_components: int = 30,
                                 no_pca: bool = False,
                                 target_guided_fusion: bool = False,
-                                target_conditioned_embedding: bool = False) -> Dict:
+                                target_conditioned_embedding: bool = False,
+                                target_aware_transform: bool = False,
+                                target_aware_interaction_pca: bool = False,
+                                interaction_pca_components: int = 50) -> Dict:
     start_time = time.time()
     dataset_id = dataset.dataset_id
     is_cls = dataset.is_cls
@@ -55,6 +58,11 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
         kwargs.update(target_guided_fusion=True, target_column_name=dataset.target_column_name)
     if target_conditioned_embedding:
         kwargs.update(target_conditioned_embedding=True, target_column_name=dataset.target_column_name)
+    if target_aware_transform:
+        kwargs.update(target_aware_transform=True, target_column_name=dataset.target_column_name)
+    if target_aware_interaction_pca:
+        kwargs.update(target_aware_interaction_pca=True, interaction_pca_components=interaction_pca_components,
+                      target_column_name=dataset.target_column_name)
     model = model_cls(**kwargs)
     with PeakMemoryTracker(phase='train', device=device) as train_tracker:
         model.fit(x_train, y_train)
@@ -95,6 +103,15 @@ def evaluate_on_loaded_dataset(model_cls: Type[TabularModel],
         d_summary.update(target_guided_fusion=True, target_column_name=dataset.target_column_name)
     if target_conditioned_embedding:
         d_summary.update(target_conditioned_embedding=True, target_column_name=dataset.target_column_name)
+    if target_aware_transform:
+        d_summary.update(target_aware_transform=True, target_column_name=dataset.target_column_name)
+    if target_aware_interaction_pca:
+        d_summary.update(
+            target_aware_interaction_pca=True, interaction_pca_components=interaction_pca_components,
+            target_column_name=dataset.target_column_name,
+            raw_interaction_dimensions=model.interaction_transformer.raw_interaction_dimensions,
+            final_text_representation_dimensions=model.interaction_transformer.final_text_representation_dimensions,
+        )
     print(f"Scored {metrics.score:.4f} on dataset {dataset_id.name}, fold {fold} in {int(runtime)} seconds. Multimodal state: {multimodal_state}")
     return d_summary
 
@@ -117,7 +134,10 @@ def evaluate_on_dataset(model_cls: Type[TabularModel],
                         pca_components: int = 30,
                         no_pca: bool = False,
                         target_guided_fusion: bool = False,
-                        target_conditioned_embedding: bool = False) -> Dict:
+                        target_conditioned_embedding: bool = False,
+                        target_aware_transform: bool = False,
+                        target_aware_interaction_pca: bool = False,
+                        interaction_pca_components: int = 50) -> Dict:
     print(f"Running model {model_cls.MODEL_NAME} over dataset {dataset_id} with fold {fold}")
     dataset = download_dataset(dataset_id=dataset_id, multimodal_state=multimodal_state, target_override=target_override)
     return evaluate_on_loaded_dataset(
@@ -140,4 +160,7 @@ def evaluate_on_dataset(model_cls: Type[TabularModel],
         no_pca=no_pca,
         target_guided_fusion=target_guided_fusion,
         target_conditioned_embedding=target_conditioned_embedding,
+        target_aware_transform=target_aware_transform,
+        target_aware_interaction_pca=target_aware_interaction_pca,
+        interaction_pca_components=interaction_pca_components,
     )

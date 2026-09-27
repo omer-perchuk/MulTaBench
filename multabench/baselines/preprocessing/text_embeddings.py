@@ -41,6 +41,27 @@ class _TargetGuidedTransform:
         return np.concatenate([X, X * self.target_embedding], axis=1)
 
 
+class _TargetAwareTransform:
+    """Metadata-only geometry on unit vectors, preserving original embedding features."""
+
+    def __init__(self, target_embedding: np.ndarray):
+        norm = np.linalg.norm(target_embedding)
+        if not np.isfinite(norm) or norm == 0:
+            raise ValueError('Target embedding must have a finite, nonzero norm.')
+        self.target_embedding = target_embedding / norm
+        self.n_components = 3 * target_embedding.shape[0] + 1
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        if not np.all(np.isfinite(norms)) or np.any(norms == 0):
+            raise ValueError('Text embeddings must have finite, nonzero norms.')
+        unit = X / norms  # New array: the original E5 block is never modified.
+        cosine = unit @ self.target_embedding[:, None]
+        parallel = cosine * self.target_embedding
+        residual = unit - parallel
+        return np.concatenate([X, parallel, residual, cosine], axis=1)
+
+
 class SkrubColumnEncoder:
     """Per-column text encoder using skrub.StringEncoder (TF-IDF + TruncatedSVD). CPU-only, no tokenizer needed."""
 
@@ -85,6 +106,62 @@ class E5ColumnEncoder:
         return self.encoder.transform(X)
 
 
+class TargetAwareInteractionPCA:
+    """Joint frozen text transformer. fit() receives training X and metadata only."""
+
+    @classmethod
+    def fit(cls, x: DataFrame, text_features: Set[str], target_column_name: str,
+            device: torch.device, e5_model_name: str = E5_SMALL_V2,
+            n_components: int = 50):
+        columns = sorted(text_features)
+        if len(columns) != 2:
+            raise ValueError(f'Target-aware interaction PCA requires exactly two text columns; detected {columns}.')
+        if not isinstance(target_column_name, str) or not target_column_name.strip():
+            raise ValueError('Target-aware interaction PCA requires raw target column name metadata.')
+        if e5_model_name == TF_IDF:
+            raise ValueError('Target-aware interaction PCA requires frozen E5, not TF-IDF.')
+        if not isinstance(n_components, int) or n_components < 1 or n_components > len(x):
+            raise ValueError('interaction_pca_components must be positive and no greater than the training row count.')
+        result = cls()
+        model, tokenizer = get_vanilla_e5(device, model_name=e5_model_name)
+        model.requires_grad_(False)
+        result.target_embedding = encode_texts_with_e5(
+            texts=[target_column_name], col_name=None, model=model, tokenizer=tokenizer, device=device,
+        )[0]
+        dimension = result.target_embedding.shape[0]
+        result.raw_interaction_dimensions = 3 * dimension
+        if n_components > result.raw_interaction_dimensions:
+            raise ValueError('interaction_pca_components exceeds the raw interaction dimensionality.')
+        result.encoders = {col: E5ColumnEncoder(model, tokenizer, _IdentityTransform(dimension), col)
+                           for col in columns}
+        e1, e2 = result._encode(x, device)
+        result.pca = PCA(n_components=n_components, random_state=SEED)
+        result.pca.fit(result.interactions(e1, e2))
+        result.final_text_representation_dimensions = 2 * dimension + n_components
+        print(f"Target-aware interaction PCA: enabled\nTarget column: {target_column_name}\n"
+              f"Text columns: {columns}\nOriginal text embedding dimensions: {2 * dimension}\n"
+              f"Raw interaction dimensions: {result.raw_interaction_dimensions}\n"
+              f"Interaction PCA components: {n_components}\n"
+              f"Final text representation dimensions: {result.final_text_representation_dimensions}")
+        return result
+
+    def _encode(self, x: DataFrame, device: torch.device):
+        return [encoder.encode_texts(x[col].astype(str).fillna('').tolist(), device)
+                for col, encoder in self.encoders.items()]
+
+    def interactions(self, e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
+        return np.concatenate([e1 * self.target_embedding, e2 * self.target_embedding, e1 * e2], axis=1)
+
+    def transform(self, x: DataFrame, device: torch.device) -> DataFrame:
+        e1, e2 = self._encode(x, device)
+        compact = self.pca.transform(self.interactions(e1, e2))
+        names = [f'{col}_txt_pca_{i}' for col, encoder in self.encoders.items()
+                 for i in range(encoder.n_components)]
+        names += [f'target_interaction_pca_{i}' for i in range(self.pca.n_components)]
+        text = pd.DataFrame(np.concatenate([e1, e2, compact], axis=1), index=x.index, columns=names)
+        return pd.concat([x.drop(columns=list(self.encoders)), text], axis=1)
+
+
 def _encoding_column_name(col_name: str, target_column_name: str | None) -> str:
     if target_column_name is None:
         return col_name
@@ -122,10 +199,24 @@ def fit_text_encoders_vanilla(
     target_guided_fusion: bool = False,
     target_column_name: str | None = None,
     target_conditioned_embedding: bool = False,
+    target_aware_transform: bool = False,
 ) -> Dict[str, E5ColumnEncoder]:
     """Fit one E5ColumnEncoder per column using shared vanilla E5 + PCA per column. Uses passage: col_name: col_val format."""
     text_encoders: Dict[str, E5ColumnEncoder] = {}
     model, tokenizer = get_vanilla_e5(device, model_name=e5_model_name)
+    if target_aware_transform:
+        model.requires_grad_(False)
+        target_embedding = encode_texts_with_e5(
+            texts=[target_column_name], col_name=None, model=model, tokenizer=tokenizer, device=device,
+        )[0]
+        transform = _TargetAwareTransform(target_embedding)
+        dimension = target_embedding.shape[0]
+        print(f"Target-aware frozen transform: enabled\nTarget column: {target_column_name}\n"
+              f"Target embedding dimension: {dimension}\nText columns: {text_features_list}\n"
+              f"Original text embedding dimensions: {dimension * len(text_features_list)}\n"
+              f"Final text representation dimensions: {transform.n_components * len(text_features_list)}")
+        return {str(col): E5ColumnEncoder(model=model, tokenizer=tokenizer, encoder=transform, col_name=str(col))
+                for col in text_features_list}
     conditioned_target = target_column_name if target_conditioned_embedding else None
     if target_conditioned_embedding:
         model.requires_grad_(False)
@@ -256,6 +347,7 @@ def fit_text_encoders(
     target_guided_fusion: bool = False,
     target_column_name: str | None = None,
     target_conditioned_embedding: bool = False,
+    target_aware_transform: bool = False,
 ) -> Dict[str, E5ColumnEncoder]:
     """
     Fit one E5 model per text column (or vanilla E5 shared across columns when not tuning).
@@ -263,6 +355,15 @@ def fit_text_encoders(
     Returns text_encoders mapping column -> E5ColumnEncoder.
     """
     text_features_list = sorted(text_features)
+    if target_aware_transform:
+        if target_guided_fusion or target_conditioned_embedding:
+            raise ValueError('target_aware_transform cannot be combined with other target embedding experiments.')
+        if tune_e5 or e5_model_name == TF_IDF:
+            raise ValueError('Target-aware transform requires frozen E5, without fine-tuning or TF-IDF.')
+        if not isinstance(target_column_name, str) or not target_column_name.strip():
+            raise ValueError('Target-aware transform requires target column name metadata.')
+        if not text_features_list:
+            raise ValueError('Target-aware transform requires at least one detected text column.')
     if target_conditioned_embedding:
         if target_guided_fusion:
             raise ValueError('target_conditioned_embedding and target_guided_fusion cannot be combined.')
@@ -310,6 +411,7 @@ def fit_text_encoders(
         target_guided_fusion=target_guided_fusion,
         target_column_name=target_column_name,
         target_conditioned_embedding=target_conditioned_embedding,
+        target_aware_transform=target_aware_transform,
     )
 
 
@@ -324,6 +426,12 @@ def transform_text_features(
         n_components = wrapper.n_components
         pca_vec = wrapper.encoder.transform(embeddings)
         pca_cols = [f"{text_col}_txt_pca_{i}" for i in range(n_components)]
+        if isinstance(wrapper.encoder, _TargetAwareTransform):
+            dimension = wrapper.encoder.target_embedding.shape[0]
+            pca_cols = ([f"{text_col}_e5_{i}" for i in range(dimension)] +
+                        [f"{text_col}_target_parallel_{i}" for i in range(dimension)] +
+                        [f"{text_col}_target_residual_{i}" for i in range(dimension)] +
+                        [f"{text_col}_target_cosine"])
         if isinstance(wrapper, E5ColumnEncoder) and wrapper.target_column_name is not None:
             pca_cols = [f"{text_col}_target_conditioned_{i}" for i in range(n_components)]
         if isinstance(wrapper.encoder, _TargetGuidedTransform):

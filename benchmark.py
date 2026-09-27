@@ -88,6 +88,11 @@ if __name__ == "__main__":
                         help='Use frozen E5 [embedding, embedding * target-name embedding], without text PCA.')
     parser.add_argument('--target_conditioned_embedding', action='store_true',
                         help='Prefix frozen E5 text inputs with the raw target column name.')
+    parser.add_argument('--target_aware_transform', action='store_true',
+                        help='Use frozen E5 with target-name projection, residual, and cosine; bypass text PCA.')
+    parser.add_argument('--target_aware_interaction_pca', action='store_true',
+                        help='Keep full frozen E5 embeddings and append PCA of two-column interactions.')
+    parser.add_argument('--interaction_pca_components', type=int, default=50)
     parser.add_argument('--no_pca', type=str, default='no', choices=['yes', 'no'],
                         help='Skip PCA and scaling for image/text embeddings. Exits early if dataset has >5 multimodal features.')
     args = parser.parse_args()
@@ -115,6 +120,16 @@ if __name__ == "__main__":
                     or (args.multimodal_state == "ft" and is_text_dataset(dataset))
                     or args.multimodal_state in {"ft-txt", "ft-img-ft-txt"})
     device = get_device(device=DEVICE)
+    if args.target_aware_interaction_pca:
+        if args.target_guided_fusion or args.target_conditioned_embedding or args.target_aware_transform:
+            raise ValueError('target_aware_interaction_pca cannot be combined with other target embedding experiments.')
+        if args.tune_e5 or args.e5_model == TF_IDF:
+            raise ValueError('Target-aware interaction PCA requires frozen E5, without fine-tuning or TF-IDF.')
+    if args.target_aware_transform:
+        if args.target_guided_fusion or args.target_conditioned_embedding:
+            raise ValueError('target_aware_transform cannot be combined with other target embedding experiments.')
+        if args.tune_e5 or args.e5_model == TF_IDF:
+            raise ValueError('Target-aware transform requires frozen E5, without fine-tuning or TF-IDF.')
     if args.target_conditioned_embedding:
         if args.target_guided_fusion:
             raise ValueError('target_conditioned_embedding and target_guided_fusion cannot be combined.')
@@ -163,6 +178,9 @@ if __name__ == "__main__":
             no_pca=no_pca,
             target_guided_fusion=args.target_guided_fusion,
             target_conditioned_embedding=args.target_conditioned_embedding,
+            target_aware_transform=args.target_aware_transform,
+            target_aware_interaction_pca=args.target_aware_interaction_pca,
+            interaction_pca_components=args.interaction_pca_components,
         )
         wandb_finish(d_summary=ret)
     except MultimodalError as e:
